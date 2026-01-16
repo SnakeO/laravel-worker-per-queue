@@ -4,23 +4,39 @@
  * Queue worker supervisor command with Horizon-style configuration.
  * Spawns multiple workers per supervisor with per-supervisor settings
  * for queues, processes, timeout, memory, etc.
+ *
+ * Features:
+ * - Config-driven worker counts per queue
+ * - Auto-restart dead workers
+ * - Optional integrated scheduler (--with-scheduler)
+ * - Queue job counts on startup
+ * - Periodic status output every 5 minutes
  */
 
 namespace Snakeo\WorkerPerQueue\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\Process\Process;
 
 class QueueWorkAllCommand extends Command
 {
-    protected $signature = 'queue:work-all';
+    protected $signature = 'queue:work-all {--with-scheduler : Also run the Laravel scheduler}';
 
     protected $description = 'Start queue workers using supervisor configuration';
 
     /** @var array<string, Process> */
     protected array $workers = [];
 
+    protected ?Process $schedulerProcess = null;
+
     protected bool $shouldQuit = false;
+
+    protected int $lastStatusOutput = 0;
+
+    protected bool $lastStatusWasEmpty = false;
+
+    protected const STATUS_INTERVAL = 300; // 5 minutes
 
     public function handle(): int
     {
@@ -66,8 +82,14 @@ class QueueWorkAllCommand extends Command
     protected function runSupervisorMode(array $supervisors): int
     {
         $this->displaySupervisorSummary($supervisors);
+        $this->displayQueueStatus();
 
         $this->registerSignalHandlers();
+
+        // Start scheduler if requested
+        if ($this->option('with-scheduler')) {
+            $this->startScheduler();
+        }
 
         $totalWorkers = 0;
 
@@ -84,11 +106,22 @@ class QueueWorkAllCommand extends Command
         $supervisorCount = count($supervisors);
         $this->newLine();
         $this->info("{$totalWorkers} workers started across {$supervisorCount} supervisors");
+        if ($this->schedulerProcess) {
+            $this->info('Scheduler running (PID: '.$this->schedulerProcess->getPid().')');
+        }
         $this->info('Press Ctrl+C to stop all workers');
         $this->newLine();
 
+        $this->lastStatusOutput = time();
+
         // Monitor loop
         while (! $this->shouldQuit) {
+            // Check scheduler process
+            if ($this->schedulerProcess && ! $this->schedulerProcess->isRunning() && ! $this->shouldQuit) {
+                $this->warn('[scheduler] died, restarting...');
+                $this->startScheduler();
+            }
+
             foreach ($this->workers as $workerId => $process) {
                 $output = $process->getIncrementalOutput();
                 $errorOutput = $process->getIncrementalErrorOutput();
@@ -114,12 +147,21 @@ class QueueWorkAllCommand extends Command
                 }
             }
 
+            // Periodic status output
+            $this->outputPeriodicStatus();
+
             usleep(100000); // 100ms
             pcntl_signal_dispatch();
         }
 
         // Graceful shutdown
         $this->info('Shutting down workers...');
+
+        if ($this->schedulerProcess && $this->schedulerProcess->isRunning()) {
+            $this->schedulerProcess->stop(5, SIGTERM);
+            $this->line('[scheduler] stopped');
+        }
+
         foreach ($this->workers as $workerId => $process) {
             if ($process->isRunning()) {
                 $process->stop(10, SIGTERM);
@@ -130,6 +172,24 @@ class QueueWorkAllCommand extends Command
         $this->info('All workers stopped');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Start the Laravel scheduler process.
+     */
+    protected function startScheduler(): void
+    {
+        $command = [
+            PHP_BINARY,
+            'artisan',
+            'schedule:work',
+        ];
+
+        $this->schedulerProcess = new Process($command, base_path());
+        $this->schedulerProcess->setTimeout(null);
+        $this->schedulerProcess->start();
+
+        $this->info('[scheduler] started (PID: '.$this->schedulerProcess->getPid().')');
     }
 
     /**
@@ -171,6 +231,110 @@ class QueueWorkAllCommand extends Command
         $this->newLine();
         $this->info("Starting {$totalWorkers} workers...");
         $this->newLine();
+    }
+
+    /**
+     * Display current queue job counts.
+     */
+    protected function displayQueueStatus(): void
+    {
+        $counts = $this->getQueueCounts();
+        $total = array_sum($counts);
+
+        if ($total === 0) {
+            $this->line('<fg=gray>Queues: all empty</>');
+            return;
+        }
+
+        $parts = [];
+        foreach ($counts as $queue => $count) {
+            if ($count > 0) {
+                $parts[] = "<fg=yellow>{$queue}</>: {$count}";
+            }
+        }
+
+        $this->line('Queued jobs: '.implode(' | ', $parts)." (<fg=yellow>{$total} total</>)");
+    }
+
+    /**
+     * Get job counts per queue from the database.
+     */
+    protected function getQueueCounts(): array
+    {
+        $counts = [];
+        $supervisors = config('worker-per-queue.supervisors', []);
+
+        // Collect all queue names
+        $allQueues = [];
+        foreach ($supervisors as $config) {
+            foreach ($config['queues'] ?? ['default'] as $queue) {
+                $allQueues[$queue] = true;
+            }
+        }
+
+        // Get counts from jobs table
+        $connection = config('queue.connections.database.connection');
+        $table = config('queue.connections.database.table', 'jobs');
+
+        try {
+            $results = DB::connection($connection)
+                ->table($table)
+                ->select('queue', DB::raw('COUNT(*) as count'))
+                ->groupBy('queue')
+                ->pluck('count', 'queue')
+                ->toArray();
+
+            foreach (array_keys($allQueues) as $queue) {
+                $counts[$queue] = $results[$queue] ?? 0;
+            }
+        } catch (\Throwable $e) {
+            // If we can't query the database, return empty counts
+            foreach (array_keys($allQueues) as $queue) {
+                $counts[$queue] = 0;
+            }
+        }
+
+        return $counts;
+    }
+
+    /**
+     * Output periodic status (every 5 minutes).
+     */
+    protected function outputPeriodicStatus(): void
+    {
+        $now = time();
+
+        if ($now - $this->lastStatusOutput < self::STATUS_INTERVAL) {
+            return;
+        }
+
+        $this->lastStatusOutput = $now;
+
+        $counts = $this->getQueueCounts();
+        $total = array_sum($counts);
+
+        if ($total === 0) {
+            // Only output "empty" once until queue has jobs again
+            if (! $this->lastStatusWasEmpty) {
+                $timestamp = date('H:i:s');
+                $this->line("<fg=gray>[{$timestamp}] Queues: all empty</>");
+                $this->lastStatusWasEmpty = true;
+            }
+            return;
+        }
+
+        // Queue has jobs - output status
+        $this->lastStatusWasEmpty = false;
+        $timestamp = date('H:i:s');
+
+        $parts = [];
+        foreach ($counts as $queue => $count) {
+            if ($count > 0) {
+                $parts[] = "{$queue}:{$count}";
+            }
+        }
+
+        $this->line("<fg=gray>[{$timestamp}]</> Queued: ".implode(' ', $parts)." (<fg=yellow>{$total}</>)");
     }
 
     protected function startWorker(string $supervisor, int $id, string $queues, array $config): void

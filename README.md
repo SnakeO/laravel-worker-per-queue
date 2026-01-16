@@ -85,6 +85,16 @@ Start all workers:
 php artisan queue:work-all
 ```
 
+### With Scheduler
+
+Run the Laravel scheduler alongside workers (great for development):
+
+```bash
+php artisan queue:work-all --with-scheduler
+```
+
+This spawns `schedule:work` as a managed process that auto-restarts if it dies.
+
 ### Example Output
 
 ```
@@ -99,8 +109,11 @@ Queue Supervisor Configuration
 | bot-tasks        | bot-tasks        | 1       | 300s    | 512MB  | 1     |
 +------------------+------------------+---------+---------+--------+-------+
 
+Queued jobs: gmail-sync: 5 | email-processing: 12 (17 total)
+
 Starting 7 workers...
 
+[scheduler] started (PID: 12344)
 [default:1] started (PID: 12345) -> default
 [gmail-sync:1] started (PID: 12346) -> gmail-sync
 [gmail-sync:2] started (PID: 12347) -> gmail-sync
@@ -110,7 +123,11 @@ Starting 7 workers...
 [bot-tasks:1] started (PID: 12351) -> bot-tasks
 
 7 workers started across 4 supervisors
+Scheduler running (PID: 12344)
 Press Ctrl+C to stop all workers
+
+[14:35:00] Queued: gmail-sync:2 email-processing:8 (10)
+[14:40:00] Queues: all empty
 ```
 
 ### Features
@@ -119,6 +136,9 @@ Press Ctrl+C to stop all workers
 - **Graceful shutdown**: Ctrl+C stops all workers cleanly
 - **Output aggregation**: All worker output is prefixed with worker ID
 - **Summary table**: See your configuration before workers start
+- **Queue counts**: Shows pending jobs per queue on startup
+- **Periodic status**: Outputs queue status every 5 minutes (suppresses repeated "empty" messages)
+- **Integrated scheduler**: Optional `--with-scheduler` runs Laravel scheduler alongside workers
 
 ## Comparison to Horizon
 
@@ -131,6 +151,8 @@ Press Ctrl+C to stop all workers
 | Auto-restart workers | Yes | Yes |
 | Graceful shutdown | Yes | Yes |
 | Metrics & monitoring | Yes | No |
+| Integrated scheduler | No | Yes (`--with-scheduler`) |
+| Queue job counts | Yes | Yes |
 
 Use **Horizon** if you need the dashboard and Redis-based features.
 
