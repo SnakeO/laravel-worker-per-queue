@@ -1,0 +1,32 @@
+{
+    "name": "snakeo/laravel-worker-per-queue",
+    "description": "Configure dedicated workers per queue. Horizon-style supervisors for any Laravel queue driver.",
+    "keywords": ["laravel", "queue", "workers", "worker-per-queue", "parallel", "supervisor", "horizon", "multi-worker"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Snakeo",
+            "homepage": "https://github.com/snakeo"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/console": "^11.0|^12.0",
+        "illuminate/support": "^11.0|^12.0",
+        "symfony/process": "^7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Snakeo\\WorkerPerQueue\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Snakeo\\WorkerPerQueue\\WorkerPerQueueServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
